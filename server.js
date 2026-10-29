@@ -14,7 +14,6 @@ const PORT = Number(process.env.PORT) || 3000;
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const CAT_DIR = path.join(PUBLIC_DIR, 'stickers', 'cats');
-const USER_STICKER_DIR = path.join(db.DATA_DIR, 'stickers');
 
 const MAX_GROUP_SIZE = 32;
 const MAX_TEXT = 2000;
@@ -22,7 +21,6 @@ const MAX_STICKERS_PER_USER = 120;
 const PAGE_SIZE = 60;
 const IMAGE_EXT = /\.(png|jpe?g|webp|gif|svg)$/i;
 
-fs.mkdirSync(USER_STICKER_DIR, { recursive: true });
 fs.mkdirSync(CAT_DIR, { recursive: true });
 
 // ---------------------------------------------------------------------------
@@ -585,7 +583,7 @@ app.get('/api/sticker-packs', auth, (_req, res) => {
 
 const DATA_URL_RE = /^data:image\/(png|webp|jpeg);base64,([A-Za-z0-9+/=]+)$/;
 
-app.post('/api/stickers', auth, (req, res) => {
+app.post('/api/stickers', auth, async (req, res) => {
   const me = req.user;
   const match = DATA_URL_RE.exec(String(req.body.data || ''));
   if (!match) throw new HttpError(400, 'Stickers must be PNG, WebP or JPEG images.');
@@ -594,18 +592,18 @@ app.post('/api/stickers', auth, (req, res) => {
   if (me.stickers.length >= MAX_STICKERS_PER_USER) throw new HttpError(400, 'Your sticker collection is full.');
   const ext = match[1] === 'jpeg' ? 'jpg' : match[1];
   const sid = `${id()}.${ext}`;
-  fs.writeFileSync(path.join(USER_STICKER_DIR, sid), buf);
+  await db.putSticker(sid, `image/${match[1]}`, buf);
   me.stickers.unshift(sid);
   db.save();
   res.json({ sticker: `c:${sid}`, user: selfUser(me) });
 });
 
 // Save a sticker someone sent you into your own collection.
-app.post('/api/stickers/save', auth, (req, res) => {
+app.post('/api/stickers/save', auth, async (req, res) => {
   const me = req.user;
   const key = String(req.body.key || '');
   const m = /^c:([\w-]+\.(png|webp|jpg))$/.exec(key);
-  if (!m || !fs.existsSync(path.join(USER_STICKER_DIR, m[1]))) throw new HttpError(404, 'Sticker not found');
+  if (!m || !(await db.getSticker(m[1]))) throw new HttpError(404, 'Sticker not found');
   if (!me.stickers.includes(m[1])) {
     if (me.stickers.length >= MAX_STICKERS_PER_USER) throw new HttpError(400, 'Your sticker collection is full.');
     me.stickers.unshift(m[1]);
@@ -618,11 +616,16 @@ app.delete('/api/stickers/:sid', auth, (req, res) => {
   const me = req.user;
   me.stickers = me.stickers.filter((s) => s !== req.params.sid);
   db.save();
-  // The file stays on disk: the sticker may still appear in old messages.
+  // The image itself is kept: the sticker may still appear in old messages.
   res.json({ user: selfUser(me) });
 });
 
-app.use('/u-stickers', express.static(USER_STICKER_DIR, { maxAge: '30d', immutable: true }));
+app.get('/u-stickers/:sid', async (req, res) => {
+  const sticker = /^[\w-]+\.(png|webp|jpg)$/.test(req.params.sid) && (await db.getSticker(req.params.sid));
+  if (!sticker) throw new HttpError(404, 'Sticker not found');
+  res.type(sticker.mime).setHeader('Cache-Control', 'public, max-age=2592000, immutable');
+  res.send(sticker.data);
+});
 
 // ---------------------------------------------------------------------------
 // Static + SPA
@@ -819,10 +822,28 @@ setInterval(() => {
   }
 }, 10_000).unref();
 
+async function shutdown() {
+  try {
+    await db.close();
+  } catch (err) {
+    console.error('Could not save before shutting down:', err);
+  }
+  process.exit(0);
+}
+
 if (require.main === module) {
-  server.listen(PORT, () => {
-    console.log(`🪷 Buddha Connect is running at http://localhost:${PORT}`);
-  });
+  db.init()
+    .then(() => {
+      server.listen(PORT, () => {
+        console.log(`🪷 Buddha Connect is running at http://localhost:${PORT}`);
+      });
+      process.on('SIGINT', shutdown);
+      process.on('SIGTERM', shutdown);
+    })
+    .catch((err) => {
+      console.error('Could not open the database:', err);
+      process.exit(1);
+    });
 }
 
 module.exports = { app, server };

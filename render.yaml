@@ -1,7 +1,8 @@
 # One-click deploy on Render (https://render.com).
-# Note: on the free plan the disk is not persistent, so accounts and chats
-# reset whenever the service restarts or redeploys. Switch to a paid plan and
-# uncomment the disk section below to keep data.
+# Accounts, chats and stickers are saved in the Postgres database given by
+# DATABASE_URL (a free Neon database works well: https://neon.tech), so they
+# survive restarts and redeploys. Without DATABASE_URL the app falls back to a
+# local file, which Render's free plan wipes on every restart.
 services:
   - type: web
     name: buddha-connect
@@ -13,9 +14,5 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "22"
-    #   - key: DATA_DIR
-    #     value: /var/data
-    # disk:
-    #   name: buddha-data
-    #   mountPath: /var/data
-    #   sizeGB: 1
+      - key: DATABASE_URL
+        sync: false

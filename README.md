@@ -62,9 +62,23 @@ domain (e.g. `buddhaconnect.com`), then add the DNS record Render shows you at y
 registrar. Render sets up HTTPS automatically. Invite links and QR codes always use whatever
 address the app is opened on, so they switch to your domain by themselves.
 
-On the free plan, the app goes to sleep when nobody uses it (the first visit afterwards takes
-about 30 seconds), and accounts and chats reset when it restarts. To keep data for good, use a
-paid plan with a disk (see `render.yaml`).
+### Keep accounts and chats forever (free database) 💾
+
+Render's free plan wipes its own disk on every restart, so the app saves everything in a
+free Postgres database instead:
+
+1. Sign up at <https://neon.tech> (free) and create a project.
+2. Copy the **connection string** (it starts with `postgresql://`).
+3. In Render, open your service → **Environment** → **Add Environment Variable**:
+   - Key: `DATABASE_URL`
+   - Value: the connection string
+   Then click **Save, rebuild and deploy**.
+
+The Render logs then say `Storage: Postgres (data survives restarts)`. Accounts, messages,
+chat settings and custom stickers are now kept for good.
+
+On the free plan, the app still goes to sleep when nobody uses it, and the first visit afterwards
+takes about 30 seconds.
 
 ### Using it on your phones
 
@@ -75,7 +89,7 @@ To chat with friends on their own phones, the app has to run somewhere they can 
   HTTPS, though; browsers only allow the camera on secure sites.
 - **Online (recommended)**: deploy to any Node host (Render, Railway, Fly.io, a VPS…) with HTTPS.
   - The start command is `npm start`, and the port comes from the `PORT` environment variable.
-  - Data is stored in `./data` (or wherever `DATA_DIR` points). Put that on a persistent disk.
+  - Set `DATABASE_URL` to a Postgres database so data survives restarts (see above).
 
 ## Adding your cats as stickers 🐱
 
@@ -89,7 +103,8 @@ Two ways:
 ## How it's built
 
 - `server.js`: Express REST API plus Socket.IO for real-time messages, typing, reactions and presence.
-- `lib/db.js`: a tiny JSON-file database (`data/db.json`), written atomically. Nothing to set up.
+- `lib/db.js`: a tiny database kept in memory and saved to Postgres when `DATABASE_URL` is set, or
+  to `data/db.json` otherwise. Nothing to set up for running locally.
 - `public/`: the app itself, in plain HTML/CSS/JS with no build step.
   - `js/app.js`: the whole UI (chats, pickers, sticker maker, QR scanner, settings)
   - `js/stickers.js`: the built-in sticker packs, drawn as SVG
