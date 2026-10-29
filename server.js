@@ -199,6 +199,8 @@ function displayName(u) {
 
 const app = express();
 app.disable('x-powered-by');
+// Hosts like Render sit behind a proxy; trust it so req.ip (rate limiting) is the real client.
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '3mb' }));
 
 app.use((req, res, next) => {

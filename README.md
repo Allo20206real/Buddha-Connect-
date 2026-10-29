@@ -57,6 +57,11 @@ another account, and paste the first account's invite link.
 2. Click **Apply**. A few minutes later you get a link like `https://buddha-connect.onrender.com`.
 3. Open that link on your phone, tap **Share → Add to Home Screen**, and send the link to your friends.
 
+**Custom domain:** in Render, open your service → **Settings → Custom Domains → Add**, type your
+domain (e.g. `buddhaconnect.com`), then add the DNS record Render shows you at your domain
+registrar. Render sets up HTTPS automatically. Invite links and QR codes always use whatever
+address the app is opened on, so they switch to your domain by themselves.
+
 On the free plan, the app goes to sleep when nobody uses it (the first visit afterwards takes
 about 30 seconds), and accounts and chats reset when it restarts. To keep data for good, use a
 paid plan with a disk (see `render.yaml`).
