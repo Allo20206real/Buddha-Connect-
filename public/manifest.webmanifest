@@ -1,0 +1,14 @@
+{
+  "name": "Buddha Connect",
+  "short_name": "Buddha",
+  "description": "Chats, stickers & good vibes with your people.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#140c26",
+  "theme_color": "#140c26",
+  "icons": [
+    { "src": "/img/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
