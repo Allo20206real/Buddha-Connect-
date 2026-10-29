@@ -1,0 +1,21 @@
+# One-click deploy on Render (https://render.com).
+# Note: on the free plan the disk is not persistent, so accounts and chats
+# reset whenever the service restarts or redeploys. Switch to a paid plan and
+# uncomment the disk section below to keep data.
+services:
+  - type: web
+    name: buddha-connect
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+    #   - key: DATA_DIR
+    #     value: /var/data
+    # disk:
+    #   name: buddha-data
+    #   mountPath: /var/data
+    #   sizeGB: 1

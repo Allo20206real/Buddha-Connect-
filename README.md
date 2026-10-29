@@ -49,6 +49,18 @@ Then open <http://localhost:3000>.
 To try it with two accounts on one computer, open a second browser (or a private window), create
 another account, and paste the first account's invite link.
 
+### Put it online (get a link to share) 🚀
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Allo20206real/Buddha-Connect-)
+
+1. Click the button and sign in to Render (free).
+2. Click **Apply**. A few minutes later you get a link like `https://buddha-connect.onrender.com`.
+3. Open that link on your phone, tap **Share → Add to Home Screen**, and send the link to your friends.
+
+On the free plan, the app goes to sleep when nobody uses it (the first visit afterwards takes
+about 30 seconds), and accounts and chats reset when it restarts. To keep data for good, use a
+paid plan with a disk (see `render.yaml`).
+
 ### Using it on your phones
 
 To chat with friends on their own phones, the app has to run somewhere they can reach:
