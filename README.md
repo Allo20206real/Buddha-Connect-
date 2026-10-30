@@ -72,6 +72,21 @@ link is shown on the Pages settings page, like:
 
 Open it on your phone, tap **Share → Add to Home Screen**, and send the link to your friends.
 
+### Notifications while the app is closed (optional)
+
+So people get messages and calls even when the app is closed:
+
+1. In Supabase, open **Edge Functions** → **Deploy a new function** → **Via Editor**.
+2. Name it `push`, and replace the example code with all of
+   [`supabase/functions/push/index.ts`](supabase/functions/push/index.ts). Then click **Deploy**.
+3. In the function's **Details** (or settings), turn **off** "Enforce JWT verification" and save.
+   The database proves who it is with its own secret instead.
+4. Make sure you've run the latest `supabase/setup.sql`.
+
+Then each person turns it on for their phone in **Me → 🔔 Notifications when the app is closed**.
+On iPhone (iOS 16.4+) this works once the app has been added to the Home Screen and opened from
+there.
+
 ### Custom domain (optional)
 
 In **Settings → Pages → Custom domain**, type your domain (e.g. `buddhaconnect.com`) and save.

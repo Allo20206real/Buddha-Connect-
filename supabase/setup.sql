@@ -5,6 +5,14 @@
 -- It is safe to run again later (for example after an update).
 -- =============================================================================
 
+-- Lets the database call the "push" Edge Function (for notifications).
+do $$
+begin
+  create extension if not exists pg_net;
+exception when others then
+  raise notice 'pg_net is not available; notifications while the app is closed are off.';
+end $$;
+
 -- ---------------------------------------------------------------------------
 -- Tables
 -- ---------------------------------------------------------------------------
@@ -105,6 +113,27 @@ create table if not exists public.calls (
 );
 create index if not exists calls_callee on public.calls (callee_id, status);
 create index if not exists calls_caller on public.calls (caller_id, status);
+
+-- Phones/browsers that asked for notifications while the app is closed.
+create table if not exists public.push_subscriptions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles on delete cascade,
+  endpoint text not null unique check (char_length(endpoint) <= 1000),
+  p256dh text not null check (char_length(p256dh) <= 200),
+  auth text not null check (char_length(auth) <= 100),
+  created_at timestamptz not null default now()
+);
+create index if not exists push_subscriptions_user on public.push_subscriptions (user_id);
+
+-- Settings for the "push" Edge Function. It fills this in itself the first time it runs.
+-- Nobody but the function (and you, in the dashboard) can read it.
+create table if not exists public.push_config (
+  id int primary key default 1 check (id = 1),
+  vapid_public text,
+  vapid_private text,
+  secret text,
+  function_url text
+);
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -511,6 +540,67 @@ begin
   perform add_system_message(c.chat_id, note);
 end $$;
 
+-- ---- Notifications while the app is closed ----
+
+create or replace function public.save_push_subscription(sub_endpoint text, sub_p256dh text, sub_auth text) returns void
+language plpgsql security definer set search_path = public as $$
+declare
+  me uuid := require_user();
+begin
+  -- One device belongs to whoever last turned notifications on with it.
+  delete from push_subscriptions where endpoint = sub_endpoint;
+  insert into push_subscriptions (user_id, endpoint, p256dh, auth) values (me, sub_endpoint, sub_p256dh, sub_auth);
+end $$;
+
+create or replace function public.remove_push_subscription(sub_endpoint text) returns void
+language sql security definer set search_path = public as $$
+  delete from push_subscriptions where endpoint = sub_endpoint and user_id = auth.uid();
+$$;
+
+-- Tells the "push" Edge Function about a new message or call. Never blocks sending.
+create or replace function public.notify_push() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  cfg push_config;
+  kind text;
+  sender uuid;
+  payload jsonb := to_jsonb(new); -- read fields this way: messages and calls have different columns
+begin
+  if tg_table_name = 'messages' then
+    if payload ->> 'type' = 'system' then return null; end if;
+    kind := 'message';
+    sender := (payload ->> 'sender_id')::uuid;
+  else
+    if payload ->> 'status' <> 'ringing' then return null; end if;
+    kind := 'call';
+    sender := (payload ->> 'caller_id')::uuid;
+  end if;
+  select * into cfg from push_config where id = 1;
+  if cfg.function_url is null or cfg.secret is null then return null; end if;
+  if not exists (
+    select 1 from push_subscriptions ps
+    join chat_members m on m.user_id = ps.user_id
+    where m.chat_id = (payload ->> 'chat_id')::uuid and m.user_id is distinct from sender
+  ) then
+    return null; -- nobody to notify
+  end if;
+  perform net.http_post(
+    url := cfg.function_url,
+    body := jsonb_build_object('type', kind, 'id', payload ->> 'id'),
+    headers := jsonb_build_object('Content-Type', 'application/json', 'x-push-secret', cfg.secret)
+  );
+  return null;
+exception when others then
+  return null;
+end $$;
+
+drop trigger if exists messages_push on public.messages;
+create trigger messages_push after insert on public.messages
+  for each row execute function public.notify_push();
+drop trigger if exists calls_push on public.calls;
+create trigger calls_push after insert on public.calls
+  for each row execute function public.notify_push();
+
 -- Everything the chat list needs in one call.
 create or replace function public.my_chats(only_chat uuid default null) returns jsonb
 language sql security definer set search_path = public stable as $$
@@ -544,9 +634,12 @@ alter table public.chat_members enable row level security;
 alter table public.messages enable row level security;
 alter table public.user_stickers enable row level security;
 alter table public.calls enable row level security;
+alter table public.push_subscriptions enable row level security;
+alter table public.push_config enable row level security;
 
 revoke all on public.profiles, public.invite_codes, public.friendships, public.chats,
-  public.chat_members, public.messages, public.user_stickers, public.calls from anon, authenticated;
+  public.chat_members, public.messages, public.user_stickers, public.calls,
+  public.push_subscriptions, public.push_config from anon, authenticated;
 
 grant select on public.profiles to authenticated;
 grant update (display_name, avatar_emoji, avatar_color, avatar_path, bio, prefs, last_seen) on public.profiles to authenticated;
@@ -559,6 +652,7 @@ grant select, delete on public.messages to authenticated;
 grant insert (chat_id, sender_id, type, text, sticker, reply_to, client_id) on public.messages to authenticated;
 grant select, insert, delete on public.user_stickers to authenticated;
 grant select on public.calls to authenticated;
+grant select on public.push_subscriptions to authenticated;
 
 drop policy if exists "profiles readable" on public.profiles;
 create policy "profiles readable" on public.profiles for select to authenticated using (true);
@@ -602,17 +696,25 @@ drop policy if exists "own calls" on public.calls;
 create policy "own calls" on public.calls for select to authenticated
   using (auth.uid() in (caller_id, callee_id));
 
+drop policy if exists "own push subscriptions" on public.push_subscriptions;
+create policy "own push subscriptions" on public.push_subscriptions for select to authenticated
+  using (user_id = auth.uid());
+-- push_config has row level security on and no policies: only the Edge Function can read it.
+
 -- Functions only logged-in people should call.
 revoke execute on function public.lookup_invite(text), public.add_friend(text), public.remove_friend(uuid),
   public.reset_invite_code(), public.create_chat(uuid[], boolean, text, text), public.add_members(uuid, uuid[]),
   public.leave_chat(uuid), public.clear_chat(uuid), public.mark_read(uuid), public.post_system_message(uuid, text),
   public.toggle_reaction(uuid, text), public.my_chats(uuid),
-  public.start_call(uuid, boolean), public.answer_call(uuid), public.end_call(uuid, text) from public, anon;
+  public.start_call(uuid, boolean), public.answer_call(uuid), public.end_call(uuid, text),
+  public.save_push_subscription(text, text, text), public.remove_push_subscription(text) from public, anon;
 grant execute on function public.lookup_invite(text), public.add_friend(text), public.remove_friend(uuid),
   public.reset_invite_code(), public.create_chat(uuid[], boolean, text, text), public.add_members(uuid, uuid[]),
   public.leave_chat(uuid), public.clear_chat(uuid), public.mark_read(uuid), public.post_system_message(uuid, text),
   public.toggle_reaction(uuid, text), public.my_chats(uuid),
-  public.start_call(uuid, boolean), public.answer_call(uuid), public.end_call(uuid, text) to authenticated;
+  public.start_call(uuid, boolean), public.answer_call(uuid), public.end_call(uuid, text),
+  public.save_push_subscription(text, text, text), public.remove_push_subscription(text) to authenticated;
+revoke execute on function public.notify_push() from public, anon, authenticated;
 grant execute on function public.username_available(text) to anon, authenticated;
 
 -- ---------------------------------------------------------------------------

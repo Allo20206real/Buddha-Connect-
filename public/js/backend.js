@@ -172,6 +172,8 @@
   }
 
   async function logout() {
+    // This device shouldn't keep getting the old account's notifications.
+    await disablePush().catch(() => {});
     stopLive();
     me = null;
     meCache = null;
@@ -416,6 +418,69 @@
     ...(Array.isArray(cfg.turnServers) ? cfg.turnServers : []),
   ];
 
+  async function pendingCall() {
+    const { data } = await sb
+      .from('calls')
+      .select('*')
+      .eq('callee_id', me)
+      .eq('status', 'ringing')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    return data?.[0] ? normCall(data[0]) : null;
+  }
+
+  // ---- Notifications while the app is closed (Web Push) ----------------------
+
+  const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isInstalled = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+
+  // 'on' | 'off' | 'denied' | 'install' (iPhone: add to Home Screen first) | 'unsupported'
+  async function pushStatus() {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+      return isIOS() && !isInstalled() ? 'install' : 'unsupported';
+    }
+    if (Notification.permission === 'denied') return 'denied';
+    const reg = await navigator.serviceWorker.getRegistration();
+    const sub = await reg?.pushManager.getSubscription();
+    return sub && Notification.permission === 'granted' ? 'on' : 'off';
+  }
+
+  function b64ToBytes(b64) {
+    const raw = atob((b64 + '='.repeat((4 - (b64.length % 4)) % 4)).replace(/-/g, '+').replace(/_/g, '/'));
+    return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+  }
+
+  async function enablePush() {
+    // Must be the first thing after the tap, or browsers refuse to ask.
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') throw new Error('Notifications are blocked. Allow them in your phone’s settings for this app.');
+    const reg = await navigator.serviceWorker.register('sw.js');
+    await navigator.serviceWorker.ready;
+    const { data, error } = await sb.functions.invoke('push', { body: { action: 'vapid' } });
+    if (error || !data?.publicKey) {
+      throw new Error('Notifications aren’t switched on in Supabase yet: the “push” function needs to be added (see the README).');
+    }
+    const key = b64ToBytes(data.publicKey);
+    let sub = await reg.pushManager.getSubscription();
+    const current = sub?.options?.applicationServerKey;
+    if (sub && current && btoa(String.fromCharCode(...new Uint8Array(current))) !== btoa(String.fromCharCode(...key))) {
+      await sub.unsubscribe();
+      sub = null;
+    }
+    sub ||= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+    const j = sub.toJSON();
+    check(await sb.rpc('save_push_subscription', { sub_endpoint: j.endpoint, sub_p256dh: j.keys.p256dh, sub_auth: j.keys.auth }));
+  }
+
+  async function disablePush() {
+    if (!('serviceWorker' in navigator)) return;
+    const reg = await navigator.serviceWorker.getRegistration();
+    const sub = await reg?.pushManager?.getSubscription();
+    if (!sub) return;
+    if (me) await sb.rpc('remove_push_subscription', { sub_endpoint: sub.endpoint });
+    await sub.unsubscribe();
+  }
+
   // ---- Stickers ------------------------------------------------------------
 
   async function packs() {
@@ -621,6 +686,10 @@
     answerCall,
     endCall,
     callChannel,
+    pendingCall,
+    pushStatus,
+    enablePush,
+    disablePush,
     iceServers,
     me: () => me,
     isOnline: (id) => online.has(id),

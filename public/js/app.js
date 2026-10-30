@@ -581,6 +581,28 @@
     }
     route();
     handlePendingInvite();
+    checkPendingCall();
+  }
+
+  // Opened the app from a "… is calling" notification? Show the call if it's still ringing.
+  async function checkPendingCall() {
+    try {
+      const c = await Backend.pendingCall();
+      if (c) onCallEvent(c);
+    } catch {
+      /* no call waiting */
+    }
+  }
+
+  if ('serviceWorker' in navigator) {
+    // The service worker shows notifications while the app is closed.
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+    navigator.serviceWorker.addEventListener('message', (e) => {
+      if (e.data?.type !== 'open' || !state.me) return;
+      const hash = new URL(e.data.url).hash;
+      if (hash) navigate(hash.replace(/^#/, ''));
+      checkPendingCall();
+    });
   }
 
   function logoutLocal() {
@@ -3066,7 +3088,46 @@
     const oldPw = h('input', { type: 'password', placeholder: 'Current password', autocomplete: 'current-password' });
     const newPw = h('input', { type: 'password', placeholder: 'New password (6+ characters)', autocomplete: 'new-password', minlength: 6 });
 
-    const notifOn = 'Notification' in window && Notification.permission === 'granted';
+    // "Notifications when the app is closed": filled in once we know this device's status.
+    const pushRow = h('div', { class: 'push-row' });
+    const pushSwitch = h('input', {
+      type: 'checkbox',
+      class: 'switch',
+      disabled: true,
+      onchange: async (e) => {
+        const on = e.target.checked;
+        e.target.disabled = true;
+        try {
+          if (on) {
+            await Backend.enablePush();
+            toast('Notifications on 🔔 You’ll get messages and calls even when the app is closed');
+          } else {
+            await Backend.disablePush();
+            toast('Notifications off for this device');
+          }
+        } catch (err) {
+          toastError(err);
+        }
+        refreshPush();
+      },
+    });
+    async function refreshPush() {
+      const status = await Backend.pushStatus().catch(() => 'unsupported');
+      pushSwitch.checked = status === 'on';
+      pushSwitch.disabled = !['on', 'off'].includes(status);
+      const hint = {
+        on: 'You’ll get new messages and calls on this device, even when the app is closed. Muted chats stay quiet.',
+        off: 'Get new messages and calls on this device even when the app is closed.',
+        denied: 'Notifications are blocked for this app. Allow them in your phone’s settings, then come back.',
+        install: 'On iPhone, first add Buddha Connect to your Home Screen (Share → Add to Home Screen), then open it from there.',
+        unsupported: 'This browser can’t show notifications while the app is closed.',
+      }[status];
+      pushRow.replaceChildren(
+        h('label', { class: 'toggle-row' }, h('span', {}, '🔔 Notifications when the app is closed'), pushSwitch),
+        h('p', { class: 'muted small' }, hint),
+      );
+    }
+    refreshPush();
 
     root.replaceChildren(
       h(
@@ -3139,29 +3200,7 @@
             onchange: (e) => setPref({ enterToSend: e.target.checked }),
           }),
         ),
-        'Notification' in window
-          ? h(
-              'label',
-              { class: 'toggle-row' },
-              h('span', {}, 'Pop-up notifications'),
-              h('input', {
-                type: 'checkbox',
-                class: 'switch',
-                checked: notifOn,
-                disabled: Notification.permission === 'denied',
-                onchange: async (e) => {
-                  if (e.target.checked) {
-                    const p = await Notification.requestPermission();
-                    e.target.checked = p === 'granted';
-                    if (p !== 'granted') toast('Notifications are blocked in your browser settings');
-                  } else {
-                    toast('To turn notifications off fully, use your browser’s site settings');
-                    e.target.checked = true;
-                  }
-                },
-              }),
-            )
-          : null,
+        pushRow,
         h(
           'details',
           { class: 'pw-box' },
