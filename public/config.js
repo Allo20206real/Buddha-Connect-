@@ -5,4 +5,7 @@
 window.BC_CONFIG = {
   supabaseUrl: 'https://ffdohykdcbqgekwpagmc.supabase.co',
   supabaseAnonKey: 'sb_publishable_jBCOx3KMy7tqPHtVhm0vjw_Kat1wbBq',
+  // Optional: extra TURN servers for calls on strict networks, e.g.
+  // [{ urls: 'turn:example.com:3478', username: '...', credential: '...' }]
+  turnServers: [],
 };

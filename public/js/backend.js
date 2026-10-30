@@ -365,6 +365,57 @@
     typingChannel?.send({ type: 'broadcast', event: 'typing', payload: { chatId, userId: me, typing: !!isTyping } });
   }
 
+  // ---- Calls ---------------------------------------------------------------
+  // Supabase only carries the "ring" and the connection set-up messages; the
+  // audio/video itself goes directly between the two devices (WebRTC).
+
+  function normCall(r) {
+    return {
+      id: r.id,
+      chatId: r.chat_id,
+      callerId: r.caller_id,
+      calleeId: r.callee_id,
+      video: !!r.video,
+      status: r.status,
+      createdAt: ms(r.created_at),
+      answeredAt: ms(r.answered_at),
+    };
+  }
+
+  async function startCall(otherId, video) {
+    return normCall(check(await sb.rpc('start_call', { other: otherId, with_video: !!video })));
+  }
+
+  async function answerCall(callId) {
+    return normCall(check(await sb.rpc('answer_call', { call_id: callId })));
+  }
+
+  async function endCall(callId, status) {
+    check(await sb.rpc('end_call', { call_id: callId, final_status: status }));
+  }
+
+  // A channel only the two people in a call know about (its name is the secret call id).
+  function callChannel(callId, onSignal) {
+    const channel = sb.channel(`call:${callId}`, { config: { broadcast: { self: false } } });
+    channel.on('broadcast', { event: 'signal' }, ({ payload }) => payload?.from !== me && onSignal(payload));
+    const ready = new Promise((resolve, reject) => {
+      channel.subscribe((status) => {
+        if (status === 'SUBSCRIBED') resolve();
+        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') reject(new Error('Couldn’t connect the call.'));
+      });
+    });
+    return {
+      ready,
+      send: (msg) => channel.send({ type: 'broadcast', event: 'signal', payload: { ...msg, from: me } }),
+      leave: () => sb.removeChannel(channel),
+    };
+  }
+
+  const iceServers = [
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+    ...(Array.isArray(cfg.turnServers) ? cfg.turnServers : []),
+  ];
+
   // ---- Stickers ------------------------------------------------------------
 
   async function packs() {
@@ -479,6 +530,9 @@
         if (p) emit('friend:new', normUser(p));
       }
     });
+    table('calls', ({ eventType, new: row }) => {
+      if (eventType === 'INSERT' || eventType === 'UPDATE') emit('call', normCall(row));
+    });
     table('profiles', ({ eventType, new: row }) => {
       if (eventType === 'UPDATE' && row.id !== me) emit('user', normUser(row));
     });
@@ -563,6 +617,12 @@
     saveSticker,
     deleteSticker,
     stickerUrl,
+    startCall,
+    answerCall,
+    endCall,
+    callChannel,
+    iceServers,
+    me: () => me,
     isOnline: (id) => online.has(id),
   };
 })();

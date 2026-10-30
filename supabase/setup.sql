@@ -90,6 +90,22 @@ create table if not exists public.user_stickers (
   primary key (user_id, path)
 );
 
+-- Voice and video calls. The call itself goes directly between the two phones;
+-- this table only tracks who is calling whom (and lets the other phone ring).
+create table if not exists public.calls (
+  id uuid primary key default gen_random_uuid(),
+  chat_id uuid not null references public.chats on delete cascade,
+  caller_id uuid not null references public.profiles on delete cascade,
+  callee_id uuid not null references public.profiles on delete cascade,
+  video boolean not null default false,
+  status text not null default 'ringing' check (status in ('ringing', 'active', 'declined', 'missed', 'ended', 'busy')),
+  created_at timestamptz not null default now(),
+  answered_at timestamptz,
+  ended_at timestamptz
+);
+create index if not exists calls_callee on public.calls (callee_id, status);
+create index if not exists calls_caller on public.calls (caller_id, status);
+
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
@@ -412,6 +428,89 @@ begin
   update messages set reactions = result where id = mid;
 end $$;
 
+-- ---- Calls ----
+
+create or replace function public.call_json(c public.calls) returns jsonb
+language sql stable as $$
+  select to_jsonb(c);
+$$;
+
+create or replace function public.start_call(other uuid, with_video boolean) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  me uuid := require_user();
+  cid uuid;
+  c calls;
+begin
+  if other = me or not exists (select 1 from friendships where user_id = me and friend_id = other) then
+    raise exception 'You can only call friends.';
+  end if;
+  -- Calls nobody answered (e.g. the app was closed while ringing) count as missed.
+  update calls set status = 'missed', ended_at = now()
+  where status = 'ringing' and created_at < now() - interval '1 minute'
+    and (caller_id in (me, other) or callee_id in (me, other));
+  cid := find_direct_chat(me, other);
+  if cid is null then
+    insert into chats (type, created_by) values ('direct', me) returning id into cid;
+    insert into chat_members (chat_id, user_id) values (cid, me), (cid, other);
+  end if;
+  insert into calls (chat_id, caller_id, callee_id, video)
+  values (cid, me, other, coalesce(with_video, false))
+  returning * into c;
+  return call_json(c);
+end $$;
+
+create or replace function public.answer_call(call_id uuid) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  c calls;
+begin
+  update calls set status = 'active', answered_at = now()
+  where id = call_id and callee_id = require_user() and status = 'ringing'
+  returning * into c;
+  if c.id is null then
+    raise exception 'This call has already ended.';
+  end if;
+  return call_json(c);
+end $$;
+
+create or replace function public.end_call(call_id uuid, final_status text) returns void
+language plpgsql security definer set search_path = public as $$
+declare
+  me uuid := require_user();
+  c calls;
+  secs int;
+  kind text;
+  emoji text;
+  note text;
+begin
+  select * into c from calls where id = call_id and me in (caller_id, callee_id);
+  if c.id is null then raise exception 'Call not found'; end if;
+  if c.status not in ('ringing', 'active') then return; end if; -- already over
+  if final_status not in ('declined', 'missed', 'ended', 'busy') then raise exception 'Unknown call status'; end if;
+  if c.status = 'active' then
+    final_status := 'ended';
+  elsif final_status = 'ended' then
+    -- Hanging up before it was answered.
+    final_status := case when me = c.caller_id then 'missed' else 'declined' end;
+  end if;
+  update calls set status = final_status, ended_at = now() where id = call_id;
+
+  kind := case when c.video then 'video call' else 'voice call' end;
+  emoji := case when c.video then '📹' else '📞' end;
+  if final_status = 'ended' then
+    secs := greatest(0, extract(epoch from now() - c.answered_at)::int);
+    note := emoji || ' ' || upper(left(kind, 1)) || substr(kind, 2) || ' · ' || (secs / 60) || ':' || lpad((secs % 60)::text, 2, '0');
+  elsif final_status = 'missed' then
+    note := emoji || ' Missed ' || kind || ' from ' || display_name_of(c.caller_id);
+  elsif final_status = 'declined' then
+    note := emoji || ' ' || upper(left(kind, 1)) || substr(kind, 2) || ' declined';
+  else
+    note := emoji || ' ' || display_name_of(c.callee_id) || ' was on another call';
+  end if;
+  perform add_system_message(c.chat_id, note);
+end $$;
+
 -- Everything the chat list needs in one call.
 create or replace function public.my_chats(only_chat uuid default null) returns jsonb
 language sql security definer set search_path = public stable as $$
@@ -444,9 +543,10 @@ alter table public.chats enable row level security;
 alter table public.chat_members enable row level security;
 alter table public.messages enable row level security;
 alter table public.user_stickers enable row level security;
+alter table public.calls enable row level security;
 
 revoke all on public.profiles, public.invite_codes, public.friendships, public.chats,
-  public.chat_members, public.messages, public.user_stickers from anon, authenticated;
+  public.chat_members, public.messages, public.user_stickers, public.calls from anon, authenticated;
 
 grant select on public.profiles to authenticated;
 grant update (display_name, avatar_emoji, avatar_color, avatar_path, bio, prefs, last_seen) on public.profiles to authenticated;
@@ -458,6 +558,7 @@ grant update (pinned, muted) on public.chat_members to authenticated;
 grant select, delete on public.messages to authenticated;
 grant insert (chat_id, sender_id, type, text, sticker, reply_to, client_id) on public.messages to authenticated;
 grant select, insert, delete on public.user_stickers to authenticated;
+grant select on public.calls to authenticated;
 
 drop policy if exists "profiles readable" on public.profiles;
 create policy "profiles readable" on public.profiles for select to authenticated using (true);
@@ -497,15 +598,21 @@ drop policy if exists "own stickers" on public.user_stickers;
 create policy "own stickers" on public.user_stickers for all to authenticated
   using (user_id = auth.uid()) with check (user_id = auth.uid());
 
+drop policy if exists "own calls" on public.calls;
+create policy "own calls" on public.calls for select to authenticated
+  using (auth.uid() in (caller_id, callee_id));
+
 -- Functions only logged-in people should call.
 revoke execute on function public.lookup_invite(text), public.add_friend(text), public.remove_friend(uuid),
   public.reset_invite_code(), public.create_chat(uuid[], boolean, text, text), public.add_members(uuid, uuid[]),
   public.leave_chat(uuid), public.clear_chat(uuid), public.mark_read(uuid), public.post_system_message(uuid, text),
-  public.toggle_reaction(uuid, text), public.my_chats(uuid) from public, anon;
+  public.toggle_reaction(uuid, text), public.my_chats(uuid),
+  public.start_call(uuid, boolean), public.answer_call(uuid), public.end_call(uuid, text) from public, anon;
 grant execute on function public.lookup_invite(text), public.add_friend(text), public.remove_friend(uuid),
   public.reset_invite_code(), public.create_chat(uuid[], boolean, text, text), public.add_members(uuid, uuid[]),
   public.leave_chat(uuid), public.clear_chat(uuid), public.mark_read(uuid), public.post_system_message(uuid, text),
-  public.toggle_reaction(uuid, text), public.my_chats(uuid) to authenticated;
+  public.toggle_reaction(uuid, text), public.my_chats(uuid),
+  public.start_call(uuid, boolean), public.answer_call(uuid), public.end_call(uuid, text) to authenticated;
 grant execute on function public.username_available(text) to anon, authenticated;
 
 -- ---------------------------------------------------------------------------
@@ -539,7 +646,7 @@ do $$
 declare
   t text;
 begin
-  foreach t in array array['messages', 'chats', 'chat_members', 'friendships', 'profiles'] loop
+  foreach t in array array['messages', 'chats', 'chat_members', 'friendships', 'profiles', 'calls'] loop
     begin
       execute format('alter publication supabase_realtime add table public.%I', t);
     exception when duplicate_object then null;
