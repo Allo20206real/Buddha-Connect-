@@ -98,7 +98,6 @@
   };
 
   const state = {
-    token: store.get('token', null),
     me: null,
     friends: [],
     users: new Map(),
@@ -110,7 +109,6 @@
     replyTo: null,
     picker: null,
     packs: [],
-    socket: null,
     chatSearch: '',
     newestId: null,
   };
@@ -190,20 +188,6 @@
   // Generic utilities
   // =========================================================================
 
-  async function api(path, { method = 'GET', body } = {}) {
-    const headers = {};
-    if (body !== undefined) headers['Content-Type'] = 'application/json';
-    if (state.token) headers.Authorization = `Bearer ${state.token}`;
-    const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
-    const data = await res.json().catch(() => ({}));
-    if (res.status === 401 && state.me) {
-      logoutLocal();
-      throw new Error('Your session ended — please log in again.');
-    }
-    if (!res.ok) throw new Error(data.error || 'Something went wrong');
-    return data;
-  }
-
   const fmtTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
   function startOfDay(ts) {
@@ -263,6 +247,14 @@
   }
 
   const uid = () => 'c' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+  function qrDataUrl(text) {
+    const qr = window.qrcode(0, 'H');
+    qr.addData(text);
+    qr.make();
+    const svg = qr.createSvgTag({ cellSize: 4, margin: 1, scalable: true }).replace(/fill="black"/g, 'fill="#1a1033"');
+    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  }
 
   async function copyText(text) {
     try {
@@ -489,10 +481,8 @@
           err.textContent = '';
           try {
             const body = Object.fromEntries(fd.entries());
-            const data = await api(isReg ? '/api/register' : '/api/login', { method: 'POST', body });
-            state.token = data.token;
-            store.set('token', data.token);
-            await startSession(data.user);
+            const user = await (isReg ? Backend.register(body) : Backend.login(body));
+            await startSession(user);
           } catch (ex) {
             err.textContent = ex.message;
             btn.disabled = false;
@@ -571,7 +561,7 @@
     state.me = user;
     applyAppearance();
     renderShell();
-    connectSocket();
+    bindLive();
     try {
       await Promise.all([loadChats(), loadFriends(), loadPacks()]);
     } catch (err) {
@@ -582,28 +572,25 @@
   }
 
   function logoutLocal() {
-    state.socket?.disconnect();
     Object.assign(state, {
-      token: null,
       me: null,
       friends: [],
+      tab: 'chats',
       activeChatId: null,
       replyTo: null,
-      socket: null,
     });
     state.users.clear();
     state.chats.clear();
     state.msgs.clear();
     state.typing.clear();
-    store.set('token', null);
-    history.replaceState({}, '', '/');
+    history.replaceState(null, '', location.pathname);
     $('#sheet-root').replaceChildren();
     renderAuth();
   }
 
   async function logout() {
     try {
-      await api('/api/logout', { method: 'POST' });
+      await Backend.logout();
     } catch {
       /* already logged out */
     }
@@ -619,7 +606,7 @@
   matchMedia('(prefers-color-scheme: light)').addEventListener?.('change', applyAppearance);
 
   async function loadChats() {
-    const { chats } = await api('/api/chats');
+    const chats = await Backend.chats();
     state.chats.clear();
     for (const c of chats) {
       c.members.forEach(upsertUser);
@@ -630,29 +617,29 @@
   }
 
   async function loadFriends() {
-    const { friends } = await api('/api/friends');
+    const friends = await Backend.friends();
     friends.forEach(upsertUser);
     state.friends = friends.map((f) => f.id);
     if (state.tab === 'friends') renderFriends();
   }
 
   async function loadPacks() {
-    const { packs } = await api('/api/sticker-packs');
-    state.packs = packs;
+    state.packs = await Backend.packs();
   }
 
   // =========================================================================
   // Realtime
   // =========================================================================
 
-  function connectSocket() {
-    const socket = io({ auth: { token: state.token } });
-    state.socket = socket;
+  // Live updates arrive from Backend; the handlers are attached once per page load.
+  let liveBound = false;
+  function bindLive() {
+    if (liveBound) return;
+    liveBound = true;
+    const live = Backend.on;
 
-    socket.on('connect_error', (err) => {
-      if (err.message === 'unauthorized') logoutLocal();
-    });
-    socket.on('connect', () => {
+    live('signedout', () => state.me && logoutLocal());
+    live('connect', () => {
       $('#app')?.classList.remove('offline');
       // Catch up on anything missed while disconnected.
       if (state.me) {
@@ -660,22 +647,25 @@
         if (state.activeChatId) loadMessages(state.activeChatId, { reset: true }).catch(() => {});
       }
     });
-    socket.on('disconnect', () => $('#app')?.classList.add('offline'));
+    live('disconnect', () => state.me && $('#app')?.classList.add('offline'));
 
-    socket.on('message', onMessage);
-    socket.on('message:update', (msg) => {
+    live('message', onMessage);
+    live('message:update', (msg) => {
       const s = state.msgs.get(msg.chatId);
       if (!s) return;
       const i = s.list.findIndex((m) => m.id === msg.id);
       if (i !== -1) s.list[i] = msg;
       if (msg.chatId === state.activeChatId) renderMessages();
     });
-    socket.on('message:delete', ({ chatId, id }) => {
-      const s = state.msgs.get(chatId);
-      if (s) s.list = s.list.filter((m) => m.id !== id);
-      if (chatId === state.activeChatId) renderMessages();
+    live('message:delete', ({ id }) => {
+      // Deletions only carry the message id, so look in every open chat.
+      for (const [chatId, s] of state.msgs) {
+        const before = s.list.length;
+        s.list = s.list.filter((m) => m.id !== id);
+        if (s.list.length !== before && chatId === state.activeChatId) renderMessages();
+      }
     });
-    socket.on('chat', (chat) => {
+    live('chat', (chat) => {
       if (!chat) return;
       chat.members.forEach(upsertUser);
       if (chat.id === state.activeChatId && document.visibilityState === 'visible') chat.unread = 0;
@@ -688,19 +678,30 @@
         renderMessages();
       }
     });
-    socket.on('chat:remove', ({ id }) => {
+    live('chat:patch', (patch) => {
+      const chat = state.chats.get(patch.id);
+      if (!chat) return;
+      for (const [k, v] of Object.entries(patch)) if (v !== undefined) chat[k] = v;
+      renderChatList();
+      if (chat.id === state.activeChatId) {
+        renderChatHeader();
+        applyChatLook();
+        renderMessages();
+      }
+    });
+    live('chat:remove', ({ id }) => {
       state.chats.delete(id);
       state.msgs.delete(id);
       if (state.activeChatId === id) navigate('/');
       renderChatList();
       updateTitle();
     });
-    socket.on('chat:cleared', ({ id }) => {
+    live('chat:cleared', ({ id }) => {
       const s = state.msgs.get(id);
       if (s) s.list = [];
       if (id === state.activeChatId) loadMessages(id, { reset: true });
     });
-    socket.on('typing', ({ chatId, userId, typing }) => {
+    live('typing', ({ chatId, userId, typing }) => {
       let t = state.typing.get(chatId);
       if (!t) state.typing.set(chatId, (t = new Map()));
       clearTimeout(t.get(userId));
@@ -708,19 +709,19 @@
       else t.delete(userId);
       refreshTyping(chatId);
     });
-    socket.on('read', ({ chatId, userId, ts }) => {
+    live('read', ({ chatId, userId, ts }) => {
       const chat = state.chats.get(chatId);
       if (!chat) return;
       chat.lastRead = { ...chat.lastRead, [userId]: ts };
       if (chatId === state.activeChatId) renderMessages();
     });
-    socket.on('presence', ({ userId, online, lastSeen }) => {
+    live('presence', ({ userId, online, lastSeen }) => {
       upsertUser({ id: userId, online, ...(lastSeen ? { lastSeen } : {}) });
       renderChatList();
       if (state.activeChatId) renderChatHeader();
       if (state.tab === 'friends') renderFriends();
     });
-    socket.on('user', (u) => {
+    live('user', (u) => {
       upsertUser(u);
       for (const c of state.chats.values()) {
         const i = c.members.findIndex((m) => m.id === u.id);
@@ -733,12 +734,12 @@
       }
       if (state.tab === 'friends') renderFriends();
     });
-    socket.on('friend:new', (u) => {
+    live('friend:new', (u) => {
       upsertUser(u);
       toast(h('div', { class: 'toast-row' }, avatar(u, 'sm'), h('span', {}, h('b', {}, u.displayName), ' added you as a friend 🎉')));
       chime('in');
     });
-    socket.on('friends:changed', () => loadFriends().catch(() => {}));
+    live('friends:changed', () => loadFriends().catch(() => {}));
   }
 
   function refreshTyping(chatId) {
@@ -807,7 +808,7 @@
         const n = new Notification(chatTitle(chat), {
           body: chat.type === 'group' ? `${sender?.displayName || 'Someone'}: ${text}` : text,
           tag: chat.id,
-          icon: '/img/icon.svg',
+          icon: 'img/icon.svg',
         });
         n.onclick = () => {
           window.focus();
@@ -823,7 +824,7 @@
   function markRead(chatId) {
     const chat = state.chats.get(chatId);
     if (chat) chat.unread = 0;
-    state.socket?.emit('read', { chatId });
+    Backend.read(chatId).catch(() => {});
     updateTitle();
   }
 
@@ -838,26 +839,36 @@
   // Routing
   // =========================================================================
 
+  // Routes live in the URL hash (#/chat/<id>, #/add/<code>) so the app works
+  // on static hosting like GitHub Pages.
+  const currentRoute = () => location.hash.replace(/^#/, '') || '/';
+
+  function setRoute(path, replace) {
+    const url = path === '/' ? location.pathname + location.search : `#${path}`;
+    history[replace ? 'replaceState' : 'pushState'](null, '', url);
+  }
+
   function navigate(path, replace = false) {
-    if (location.pathname !== path) history[replace ? 'replaceState' : 'pushState']({}, '', path);
+    if (currentRoute() !== path) setRoute(path, replace);
     route();
   }
   window.addEventListener('popstate', () => state.me && route());
+  window.addEventListener('hashchange', () => state.me && route());
 
   function stashInviteFromUrl() {
-    const m = location.pathname.match(/^\/add\/([A-Za-z0-9]+)/);
+    const m = currentRoute().match(/^\/add\/([A-Za-z0-9]+)/);
     if (m) {
       sessionStorage.setItem('bc.invite', m[1].toUpperCase());
-      history.replaceState({}, '', '/');
+      setRoute('/', true);
     }
   }
 
   function route() {
     stashInviteFromUrl();
-    const m = location.pathname.match(/^\/chat\/([\w-]+)/);
+    const m = currentRoute().match(/^\/chat\/([\w-]+)/);
     if (m && state.chats.has(m[1])) openChat(m[1]);
     else {
-      if (m) history.replaceState({}, '', '/');
+      if (m) setRoute('/', true);
       closeChat();
     }
     handlePendingInvite();
@@ -1098,10 +1109,7 @@
     async function create() {
       go.disabled = true;
       try {
-        const { chat } = await api('/api/chats', {
-          method: 'POST',
-          body: { members: [...picked], group: picked.size > 1, name: nameInput.value, icon: icon_ },
-        });
+        const chat = await Backend.createChat({ members: [...picked], group: picked.size > 1, name: nameInput.value, icon: icon_ });
         state.chats.set(chat.id, chat);
         sheet.close();
         navigate(`/chat/${chat.id}`);
@@ -1246,8 +1254,8 @@
     if (s.loading) return;
     s.loading = true;
     try {
-      const before = older && s.list.length ? s.list[0].createdAt : '';
-      const { messages, hasMore } = await api(`/api/chats/${chatId}/messages${before ? `?before=${before}` : ''}`);
+      const before = older && s.list.length ? s.list[0].createdAt : null;
+      const { messages, hasMore } = await Backend.messages(chatId, before);
       if (older) {
         s.list = [...messages, ...s.list];
       } else {
@@ -1596,8 +1604,7 @@
         'Save sticker',
         async () => {
           try {
-            const { user } = await api('/api/stickers/save', { method: 'POST', body: { key: m.sticker } });
-            state.me = user;
+            state.me = await Backend.saveSticker(m.sticker);
             toast('Sticker saved to your collection ⭐');
           } catch (err) {
             toastError(err);
@@ -1609,10 +1616,7 @@
       actions.push([
         'trash',
         'Unsend',
-        () =>
-          state.socket.emit('unsend', { chatId: m.chatId, messageId: m.id }, (res) => {
-            if (!res?.ok) toast(res?.error || 'Could not unsend', { kind: 'error' });
-          }),
+        () => Backend.unsend(m.id).catch((err) => toast(err.message || 'Could not unsend', { kind: 'error' })),
         'danger',
       ]);
     }
@@ -1678,9 +1682,7 @@
   }
 
   function react(m, emoji) {
-    state.socket.emit('react', { chatId: m.chatId, messageId: m.id, emoji }, (res) => {
-      if (!res?.ok) toast(res?.error || 'Could not react', { kind: 'error' });
-    });
+    Backend.react(m.id, emoji).catch((err) => toast(err.message || 'Could not react', { kind: 'error' }));
   }
 
   function setReply(m) {
@@ -1715,7 +1717,7 @@
 
   function stopTyping() {
     clearTimeout(typingTimer);
-    if (typingSent && state.activeChatId) state.socket?.emit('typing', { chatId: state.activeChatId, typing: false });
+    if (typingSent && state.activeChatId) Backend.typing(state.activeChatId, false);
     typingSent = false;
   }
 
@@ -1732,7 +1734,7 @@
     if (!el.value.trim()) return stopTyping();
     if (!typingSent) {
       typingSent = true;
-      state.socket?.emit('typing', { chatId: state.activeChatId, typing: true });
+      Backend.typing(state.activeChatId, true);
     }
     clearTimeout(typingTimer);
     typingTimer = setTimeout(stopTyping, 2500);
@@ -1801,22 +1803,16 @@
     clearReply();
     renderMessages({ toBottom: true });
     chime('out');
-    emitSend(optimistic, reply?.id);
+    emitSend(optimistic);
   }
 
-  function emitSend(msg, replyToId) {
-    const timeout = setTimeout(() => markFailed(msg), 15000);
-    state.socket.emit(
-      'send',
-      { chatId: msg.chatId, type: msg.type, text: msg.text, sticker: msg.sticker, replyTo: replyToId || msg.replyTo?.id, clientId: msg.clientId },
-      (res) => {
-        clearTimeout(timeout);
-        if (!res?.ok) {
-          markFailed(msg);
-          toast(res?.error || 'Message not sent', { kind: 'error' });
-        }
-      },
-    );
+  function emitSend(msg) {
+    Backend.send({ chatId: msg.chatId, type: msg.type, text: msg.text, sticker: msg.sticker, replyTo: msg.replyTo, clientId: msg.clientId })
+      .then(onMessage)
+      .catch((err) => {
+        markFailed(msg);
+        toast(err.message || 'Message not sent', { kind: 'error' });
+      });
   }
 
   function markFailed(msg) {
@@ -2173,7 +2169,7 @@
             draw(out.getContext('2d'), 384);
             let data = out.toDataURL('image/webp', 0.9);
             if (!data.startsWith('data:image/webp')) data = out.toDataURL('image/png');
-            const { user, sticker } = await api('/api/stickers', { method: 'POST', body: { data } });
+            const { user, sticker } = await Backend.uploadSticker(data);
             state.me = user;
             store.set('stickerTab', 'mine');
             sheet.close();
@@ -2259,7 +2255,7 @@
 
     async function patch(body) {
       try {
-        const { chat: updated } = await api(`/api/chats/${chat.id}`, { method: 'PATCH', body });
+        const updated = await Backend.updateChat(chat.id, body);
         state.chats.set(updated.id, updated);
         if (updated.id === state.activeChatId) {
           applyChatLook();
@@ -2475,7 +2471,7 @@
               class: 'btn ghost block danger-text',
               onclick: async () => {
                 if (!(await confirmSheet('Clear this chat for everyone?', { ok: 'Clear chat', danger: true, detail: 'All messages will be deleted.' }))) return;
-                api(`/api/chats/${c.id}/clear`, { method: 'POST' }).catch(toastError);
+                Backend.clear(c.id).catch(toastError);
               },
             },
             icon('trash'),
@@ -2489,7 +2485,7 @@
                   onclick: async () => {
                     if (!(await confirmSheet(`Leave “${c.name}”?`, { ok: 'Leave group', danger: true }))) return;
                     try {
-                      await api(`/api/chats/${c.id}/leave`, { method: 'POST' });
+                      await Backend.leave(c.id);
                       sheet.close();
                       state.chats.delete(c.id);
                       navigate('/');
@@ -2519,7 +2515,7 @@
         disabled: true,
         onclick: async () => {
           try {
-            const { chat: updated } = await api(`/api/chats/${chat.id}/members`, { method: 'POST', body: { members: [...picked] } });
+            const updated = await Backend.addMembers(chat.id, [...picked]);
             state.chats.set(updated.id, updated);
             sheet.close();
             toast('Added to the group 🎉');
@@ -2564,7 +2560,7 @@
   // Friends: QR, links, scanning
   // =========================================================================
 
-  const inviteLink = () => `${location.origin}/add/${state.me.inviteCode}`;
+  const inviteLink = () => `${location.origin}${location.pathname}#/add/${state.me.inviteCode}`;
 
   function renderFriends() {
     const root = $('#tab-friends');
@@ -2583,7 +2579,7 @@
         h(
           'div',
           { class: 'qr-frame' },
-          h('img', { class: 'qr-img', src: `/api/qr.svg?text=${encodeURIComponent(link)}`, alt: 'Your friend QR code', width: 220, height: 220 }),
+          h('img', { class: 'qr-img', src: qrDataUrl(link), alt: 'Your friend QR code', width: 220, height: 220 }),
           h('div', { class: 'qr-center' }, state.me.avatar.emoji),
         ),
         h('p', { class: 'qr-caption' }, 'Friends scan this to add you instantly'),
@@ -2664,8 +2660,7 @@
           onclick: async () => {
             if (!(await confirmSheet('Reset your friend link?', { ok: 'Reset', detail: 'Your old QR code and link will stop working. Existing friends stay friends.' }))) return;
             try {
-              const { user } = await api('/api/me/invite/reset', { method: 'POST' });
-              state.me = user;
+              state.me = await Backend.resetInvite();
               renderFriends();
               toast('New link ready ✨');
             } catch (err) {
@@ -2680,7 +2675,7 @@
 
   async function startDirect(friendId) {
     try {
-      const { chat } = await api('/api/chats', { method: 'POST', body: { members: [friendId] } });
+      const chat = await Backend.createChat({ members: [friendId] });
       state.chats.set(chat.id, chat);
       navigate(`/chat/${chat.id}`);
     } catch (err) {
@@ -2705,7 +2700,7 @@
                 sheet.close();
                 if (!(await confirmSheet(`Remove ${f.displayName} from your friends?`, { ok: 'Remove', danger: true, detail: 'Your chat history stays.' }))) return;
                 try {
-                  await api(`/api/friends/${f.id}`, { method: 'DELETE' });
+                  await Backend.removeFriend(f.id);
                   state.friends = state.friends.filter((x) => x !== f.id);
                   renderFriends();
                 } catch (err) {
@@ -2732,7 +2727,7 @@
   async function showInvite(code) {
     let info;
     try {
-      info = await api(`/api/invite/${encodeURIComponent(code)}`);
+      info = await Backend.lookupInvite(code);
     } catch (err) {
       return toastError(err);
     }
@@ -2750,7 +2745,7 @@
           onclick: async (e) => {
             e.currentTarget.disabled = true;
             try {
-              const { chatId } = await api('/api/friends', { method: 'POST', body: { code } });
+              const { chatId } = await Backend.addFriend(code);
               await loadFriends();
               await loadChats();
               sheet.close();
@@ -2840,7 +2835,7 @@
     async function loadJsQR() {
       if (window.jsQR) return;
       await new Promise((res, rej) => {
-        const s = h('script', { src: '/vendor/jsQR.js' });
+        const s = h('script', { src: 'vendor/jsQR.js' });
         s.onload = res;
         s.onerror = rej;
         document.head.append(s);
@@ -2972,8 +2967,7 @@
         class: 'btn primary block',
         onclick: async () => {
           try {
-            const { user } = await api('/api/me', { method: 'PATCH', body: draft });
-            state.me = user;
+            state.me = await Backend.updateMe(draft);
             renderMeAvatar();
             renderMe();
             renderChatList();
@@ -2989,8 +2983,7 @@
     const prefs = me.prefs || {};
     const setPref = async (patch) => {
       try {
-        const { user } = await api('/api/me', { method: 'PATCH', body: { prefs: patch } });
-        state.me = user;
+        state.me = await Backend.updateMe({ prefs: patch });
         applyAppearance();
       } catch (err) {
         toastError(err);
@@ -3010,8 +3003,7 @@
             onclick: async () => {
               if (!(await confirmSheet('Remove this sticker from your collection?', { ok: 'Remove', danger: true }))) return;
               try {
-                const { user } = await api(`/api/stickers/${encodeURIComponent(f)}`, { method: 'DELETE' });
-                state.me = user;
+                state.me = await Backend.deleteSticker(f);
                 renderMe();
               } catch (err) {
                 toastError(err);
@@ -3136,7 +3128,7 @@
                 class: 'btn ghost',
                 onclick: async () => {
                   try {
-                    await api('/api/me', { method: 'PATCH', body: { password: oldPw.value, newPassword: newPw.value } });
+                    await Backend.updateMe({ password: oldPw.value, newPassword: newPw.value });
                     oldPw.value = newPw.value = '';
                     toast('Password changed 🔒');
                   } catch (err) {
@@ -3158,18 +3150,52 @@
   // Boot
   // =========================================================================
 
+  // Shown when this copy of the site hasn't been connected to Supabase yet.
+  function renderSetup() {
+    $('#app').replaceChildren(
+      h(
+        'div',
+        { class: 'auth' },
+        h(
+          'div',
+          { class: 'auth-card' },
+          h('div', { class: 'logo-mark big' }, '🪷'),
+          h('h1', { class: 'brand' }, 'Buddha ', h('span', {}, 'Connect')),
+          h('p', { class: 'tagline' }, 'Almost ready! This site still needs to be connected to its database.'),
+          h(
+            'ol',
+            { class: 'setup-steps' },
+            h('li', {}, 'Create a free project at supabase.com'),
+            h('li', {}, 'Run supabase/setup.sql in its SQL Editor'),
+            h('li', {}, 'Put the project URL and anon key in public/config.js'),
+          ),
+          h('p', { class: 'muted small' }, 'The README in the GitHub repo walks through each step.'),
+        ),
+      ),
+    );
+  }
+
   async function boot() {
     stashInviteFromUrl();
-    if (!state.token) return renderAuth(sessionStorage.getItem('bc.invite') ? 'register' : 'login');
+    if (!Backend.configured) return renderSetup();
     try {
-      const { user } = await api('/api/me');
-      await startSession(user);
-    } catch {
-      state.token = null;
-      store.set('token', null);
-      renderAuth();
+      const user = await Backend.restore();
+      if (user) return await startSession(user);
+    } catch (err) {
+      toastError(err);
     }
+    renderAuth(sessionStorage.getItem('bc.invite') ? 'register' : 'login');
   }
+
+  // Remove disappearing messages on screen once their time is up.
+  setInterval(() => {
+    const t = Date.now();
+    for (const [chatId, s] of state.msgs) {
+      const before = s.list.length;
+      s.list = s.list.filter((m) => !m.expiresAt || m.expiresAt > t);
+      if (s.list.length !== before && chatId === state.activeChatId) renderMessages();
+    }
+  }, 5000);
 
   window.addEventListener('resize', () => {
     if (state.activeChatId && document.activeElement?.id === 'composer-input') scrollToBottom();

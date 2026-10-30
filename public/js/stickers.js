@@ -1,5 +1,5 @@
 // Built-in sticker packs, drawn as SVG so they stay crisp at any size.
-// Sticker keys: "b:<id>" built-in, "p:<file>" from /stickers/cats, "c:<file>" user-made.
+// Sticker keys: "b:<id>" built-in, "p:<file>" from stickers/cats, "c:<path>" user-made (Supabase storage).
 (function () {
   const svgUrl = (svg) => 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
 
@@ -112,8 +112,8 @@
     src(key) {
       if (!key) return '';
       if (key.startsWith('b:')) return BUILTIN.get(key)?.src || '';
-      if (key.startsWith('p:')) return '/stickers/cats/' + encodeURIComponent(key.slice(2));
-      if (key.startsWith('c:')) return '/u-stickers/' + encodeURIComponent(key.slice(2));
+      if (key.startsWith('p:')) return 'stickers/cats/' + encodeURIComponent(key.slice(2));
+      if (key.startsWith('c:')) return window.Backend ? window.Backend.stickerUrl(key.slice(2)) : '';
       return '';
     },
     kind(key) {

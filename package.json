@@ -1,23 +1,14 @@
 {
   "name": "buddha-connect",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Buddha Connect — a cosy, colourful chat app. Text, emojis, stickers, custom chat themes and friends via QR code or link.",
-  "main": "server.js",
   "private": true,
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "start": "node scripts/serve.js",
+    "cats": "node scripts/build-cats.js"
   },
   "engines": {
     "node": ">=18"
   },
-  "license": "UNLICENSED",
-  "dependencies": {
-    "bcryptjs": "^3.0.3",
-    "express": "^5.1.0",
-    "jsqr": "^1.4.0",
-    "pg": "^8.23.1",
-    "qrcode": "^1.5.4",
-    "socket.io": "^4.8.1"
-  }
+  "license": "UNLICENSED"
 }
