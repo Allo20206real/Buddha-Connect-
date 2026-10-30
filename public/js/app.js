@@ -821,7 +821,7 @@
         const n = new Notification(chatTitle(chat), {
           body: chat.type === 'group' ? `${sender?.displayName || 'Someone'}: ${text}` : text,
           tag: chat.id,
-          icon: 'img/icon.svg',
+          icon: 'img/icon-192.png',
         });
         n.onclick = () => {
           window.focus();
@@ -3261,7 +3261,7 @@
       call.ringTimer = setTimeout(() => call?.status === 'incoming' && endCallLocally('Missed call'), RING_TIMEOUT);
       if (document.visibilityState === 'hidden' && 'Notification' in window && Notification.permission === 'granted') {
         try {
-          new Notification(`${other.displayName} is calling`, { body: c.video ? 'Video call 📹' : 'Voice call 📞', tag: c.id, icon: 'img/icon.svg' });
+          new Notification(`${other.displayName} is calling`, { body: c.video ? 'Video call 📹' : 'Voice call 📞', tag: c.id, icon: 'img/icon-192.png' });
         } catch {
           /* notifications unavailable */
         }
