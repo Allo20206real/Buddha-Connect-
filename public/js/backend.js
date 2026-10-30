@@ -379,7 +379,7 @@
     return [
       {
         id: 'cats',
-        name: 'My Cats',
+        name: 'Buddha & Portal',
         icon: '🐈',
         stickers: files.map((f) => ({ key: `p:${f}`, src: `stickers/cats/${encodeURIComponent(f)}`, name: pretty(f) })),
       },

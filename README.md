@@ -21,7 +21,7 @@ and stickers. Nothing ever sleeps or resets.
   - messages made only of emoji show up big
 - **Stickers**:
   - built-in **Kitty** and **Vibes** packs
-  - a **My Cats** pack from `public/stickers/cats/`
+  - a **Buddha & Portal** pack (your cats!) from `public/stickers/cats/`
   - a **sticker maker**: turn any picture into a circle, heart or rounded sticker with a caption
   - long-press a friend's sticker → **Save sticker**
 - **Customise each chat** with the 🎨 button. Both people see the changes:
@@ -82,7 +82,7 @@ once it's available. Invite links and QR codes switch to the new address automat
 
 - **In the app**: open a chat → sticker button → ⭐ → **Make**, then choose a cat picture.
 - **For everyone**: add pictures to `public/stickers/cats/` (PNG/JPG/WebP/GIF) and push.
-  They appear in the **My Cats** pack. Transparent PNGs get a die-cut white outline.
+  They appear in the **Buddha & Portal** pack. Transparent PNGs get a die-cut white outline.
 
 ## Try it on your computer
 

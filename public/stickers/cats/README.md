@@ -1,7 +1,7 @@
 # Your cat stickers 🐈
 
 Drop pictures of your cats in this folder (PNG, JPG, WebP or GIF).
-They show up for everyone in the **My Cats** sticker pack, no restart needed.
+They show up for everyone in the **Buddha & Portal** sticker pack the next time the site is published (every push to main).
 
 Tips:
 - Square pictures look best. Transparent PNGs (with the background removed)
