@@ -325,6 +325,16 @@ p {
   background: var(--grad);
   border-radius: 32%;
 }
+.avatar.has-photo {
+  background: var(--surface-3);
+}
+.avatar img {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+  display: block;
+}
 .avatar-spacer {
   width: 28px;
   flex: none;
@@ -699,6 +709,7 @@ input[type='range'] {
 .tab-body {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   overscroll-behavior: contain;
 }
 .tab {
@@ -2230,6 +2241,28 @@ input[type='range'] {
   font-size: 28px;
   background: #fff;
   box-shadow: 0 0 0 4px #fff, 0 0 0 7px var(--av, #ff3d7f);
+}
+.qr-center img {
+  width: 100%;
+  height: 100%;
+  border-radius: 14px;
+  object-fit: cover;
+}
+.crop-stage {
+  width: min(100%, 280px);
+  aspect-ratio: 1;
+  margin: 0 auto;
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--surface-2);
+  box-shadow: 0 0 0 4px var(--surface), 0 0 0 7px var(--accent-2);
+}
+.crop-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+  touch-action: none;
 }
 .qr-caption {
   font-weight: 800;

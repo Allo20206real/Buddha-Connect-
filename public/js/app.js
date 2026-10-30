@@ -405,7 +405,12 @@
   }
 
   function avatar(user, size = 'md', { dot = false } = {}) {
-    const el = h('div', { class: `avatar ${size}`, style: { '--av': user?.avatar?.color || '#7a6a8f' } }, user?.avatar?.emoji || '🙂');
+    const photo = user?.avatar?.photo;
+    const el = h(
+      'div',
+      { class: `avatar ${size} ${photo ? 'has-photo' : ''}`, style: { '--av': user?.avatar?.color || '#7a6a8f' } },
+      photo ? h('img', { src: photo, alt: '', loading: 'lazy', draggable: 'false' }) : user?.avatar?.emoji || '🐱',
+    );
     if (dot && user?.online) el.append(h('span', { class: 'presence-dot' }));
     return el;
   }
@@ -2580,7 +2585,7 @@
           'div',
           { class: 'qr-frame' },
           h('img', { class: 'qr-img', src: qrDataUrl(link), alt: 'Your friend QR code', width: 220, height: 220 }),
-          h('div', { class: 'qr-center' }, state.me.avatar.emoji),
+          h('div', { class: 'qr-center' }, state.me.avatar.photo ? h('img', { src: state.me.avatar.photo, alt: '' }) : state.me.avatar.emoji),
         ),
         h('p', { class: 'qr-caption' }, 'Friends scan this to add you instantly'),
         h('button', { class: 'code-chip', onclick: () => copyText(state.me.inviteCode).then(() => toast('Friend code copied')) }, `Code: ${state.me.inviteCode}`),
@@ -2911,6 +2916,40 @@
       previewEl.replaceWith(n);
       previewEl = n;
     };
+    // Picking an emoji switches back from a photo to the emoji (saved with "Save profile").
+    const pickEmoji = (e) => {
+      draft.avatar.emoji = e;
+      if (draft.avatar.photo) {
+        draft.avatar.photo = null;
+        draft.removePhoto = true;
+      }
+      setPreview();
+    };
+
+    const photoRow = h(
+      'div',
+      { class: 'row gap wrap' },
+      h('button', { class: 'btn primary sm', onclick: pickProfilePhoto }, icon('image'), me.avatar.photo ? 'Change photo' : 'Upload photo'),
+      me.avatar.photo
+        ? h(
+            'button',
+            {
+              class: 'btn ghost sm',
+              onclick: async () => {
+                try {
+                  state.me = await Backend.updateMe({ removePhoto: true });
+                  renderMeAvatar();
+                  renderMe();
+                  toast('Back to your emoji 🐱');
+                } catch (err) {
+                  toastError(err);
+                }
+              },
+            },
+            'Remove photo',
+          )
+        : null,
+    );
 
     const emojiGrid = h(
       'div',
@@ -2921,9 +2960,8 @@
           {
             class: `emoji-btn ${draft.avatar.emoji === e ? 'on' : ''}`,
             onclick: (ev) => {
-              draft.avatar.emoji = e;
+              pickEmoji(e);
               [...emojiGrid.children].forEach((b) => b.classList.toggle('on', b === ev.currentTarget));
-              setPreview();
             },
           },
           e,
@@ -2934,11 +2972,7 @@
         {
           class: 'emoji-btn',
           'aria-label': 'More emoji',
-          onclick: () =>
-            openEmojiSheet((e) => {
-              draft.avatar.emoji = e;
-              setPreview();
-            }),
+          onclick: () => openEmojiSheet(pickEmoji),
         },
         icon('plus', 'tiny'),
       ),
@@ -3036,7 +3070,8 @@
         h('h3', {}, 'Edit profile'),
         h('label', { class: 'field' }, h('span', {}, 'Display name'), nameIn),
         h('label', { class: 'field' }, h('span', {}, 'Bio'), bioIn),
-        h('div', { class: 'field' }, h('span', {}, 'Avatar'), emojiGrid),
+        h('div', { class: 'field' }, h('span', {}, 'Profile picture'), photoRow),
+        h('div', { class: 'field' }, h('span', {}, me.avatar.photo ? 'Or use an emoji instead' : 'Emoji'), emojiGrid),
         h('div', { class: 'field' }, h('span', {}, 'Avatar colour'), colorRow),
         saveProfile,
       ),
@@ -3144,6 +3179,117 @@
       h('button', { class: 'btn danger-soft block', onclick: logout }, icon('logout'), 'Log out'),
       h('p', { class: 'muted small center footer-note' }, 'Buddha Connect 🪷 made with love'),
     );
+  }
+
+  // ---- Profile picture -----------------------------------------------------
+
+  function pickProfilePhoto() {
+    const input = h('input', {
+      type: 'file',
+      accept: 'image/png,image/jpeg,image/webp,image/gif',
+      hidden: true,
+      onchange: (e) => {
+        const file = e.target.files?.[0];
+        input.remove();
+        if (!file) return;
+        const img = new Image();
+        img.onload = () => openPhotoCropper(img);
+        img.onerror = () => toast('Couldn’t open that picture', { kind: 'error' });
+        img.src = URL.createObjectURL(file);
+      },
+    });
+    document.body.append(input);
+    input.click();
+  }
+
+  function openPhotoCropper(img) {
+    const S = 600;
+    const canvas = h('canvas', { width: S, height: S, class: 'crop-canvas' });
+    const ctx = canvas.getContext('2d');
+    const o = { zoom: 1, x: 0, y: 0 };
+
+    function draw(c, size) {
+      const k = size / S;
+      const scale = Math.max(size / img.width, size / img.height) * o.zoom;
+      const w = img.width * scale;
+      const ht = img.height * scale;
+      c.clearRect(0, 0, size, size);
+      c.drawImage(img, (size - w) / 2 + o.x * k, (size - ht) / 2 + o.y * k, w, ht);
+    }
+
+    let drag = null;
+    canvas.addEventListener('pointerdown', (e) => {
+      drag = { x: e.clientX, y: e.clientY, ox: o.x, oy: o.y };
+      canvas.setPointerCapture(e.pointerId);
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const ratio = S / canvas.getBoundingClientRect().width;
+      o.x = drag.ox + (e.clientX - drag.x) * ratio;
+      o.y = drag.oy + (e.clientY - drag.y) * ratio;
+      draw(ctx, S);
+    });
+    canvas.addEventListener('pointerup', () => (drag = null));
+    canvas.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault();
+        o.zoom = Math.min(4, Math.max(1, o.zoom - e.deltaY * 0.0015));
+        zoomInput.value = o.zoom;
+        draw(ctx, S);
+      },
+      { passive: false },
+    );
+
+    const zoomInput = h('input', {
+      type: 'range',
+      min: 1,
+      max: 4,
+      step: 0.01,
+      value: 1,
+      oninput: (e) => {
+        o.zoom = Number(e.target.value);
+        draw(ctx, S);
+      },
+    });
+
+    const saveBtn = h(
+      'button',
+      {
+        class: 'btn primary block',
+        onclick: async () => {
+          saveBtn.disabled = true;
+          saveBtn.textContent = 'Saving…';
+          try {
+            const out = h('canvas', { width: 320, height: 320 });
+            draw(out.getContext('2d'), 320);
+            let data = out.toDataURL('image/webp', 0.88);
+            if (!data.startsWith('data:image/webp')) data = out.toDataURL('image/jpeg', 0.88);
+            state.me = await Backend.uploadAvatar(data);
+            sheet.close();
+            renderMeAvatar();
+            renderMe();
+            renderChatList();
+            toast('Looking good! New profile picture saved 📸');
+          } catch (err) {
+            toastError(err);
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Use this photo';
+          }
+        },
+      },
+      'Use this photo',
+    );
+
+    const sheet = openSheet({
+      title: 'Profile picture',
+      content: [
+        h('div', { class: 'crop-stage' }, canvas),
+        h('label', { class: 'field' }, h('span', {}, 'Zoom (drag the photo to move it)'), zoomInput),
+        h('div', { class: 'sheet-footer' }, saveBtn),
+      ],
+    });
+    draw(ctx, S);
   }
 
   // =========================================================================

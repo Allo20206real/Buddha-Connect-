@@ -21,6 +21,10 @@ create table if not exists public.profiles (
   created_at timestamptz not null default now()
 );
 
+-- Profile pictures live in the "avatars" storage bucket; this is the file's path there.
+alter table public.profiles add column if not exists avatar_path text
+  check (avatar_path ~ '^[0-9a-f-]{36}/[A-Za-z0-9_-]{1,64}\.(png|webp|jpg)$');
+
 -- Kept apart from profiles so people can only ever see their own code.
 create table if not exists public.invite_codes (
   user_id uuid primary key references public.profiles on delete cascade,
@@ -98,7 +102,8 @@ $$;
 create or replace function public.profile_json(uid uuid) returns jsonb
 language sql security definer set search_path = public stable as $$
   select jsonb_build_object('id', id, 'username', username, 'display_name', display_name,
-    'avatar_emoji', avatar_emoji, 'avatar_color', avatar_color, 'bio', bio, 'last_seen', last_seen)
+    'avatar_emoji', avatar_emoji, 'avatar_color', avatar_color, 'avatar_path', avatar_path,
+    'bio', bio, 'last_seen', last_seen)
   from profiles where id = uid;
 $$;
 
@@ -145,13 +150,11 @@ language plpgsql security definer set search_path = public as $$
 declare
   uname text := lower(coalesce(new.raw_user_meta_data ->> 'username', split_part(new.email, '@', 1)));
   dname text := left(coalesce(nullif(btrim(new.raw_user_meta_data ->> 'display_name'), ''), uname), 40);
-  emojis constant text[] := array['🐱','🪷','🌸','🦊','🐼','🦄','🍑','🐸','🦋','🍵','🐙','🐯'];
   colors constant text[] := array['#ff7a3d','#ffb703','#8338ec','#3a86ff','#06d6a0','#ef476f','#118ab2','#f15bb5'];
 begin
+  -- Everyone starts as a cat 🐱 (in a random colour) until they pick an emoji or a photo.
   insert into profiles (id, username, display_name, avatar_emoji, avatar_color)
-  values (new.id, uname, dname,
-          emojis[1 + floor(random() * array_length(emojis, 1))::int],
-          colors[1 + floor(random() * array_length(colors, 1))::int]);
+  values (new.id, uname, dname, '🐱', colors[1 + floor(random() * array_length(colors, 1))::int]);
   insert into invite_codes (user_id, code) values (new.id, new_invite_code());
   return new;
 end $$;
@@ -446,7 +449,7 @@ revoke all on public.profiles, public.invite_codes, public.friendships, public.c
   public.chat_members, public.messages, public.user_stickers from anon, authenticated;
 
 grant select on public.profiles to authenticated;
-grant update (display_name, avatar_emoji, avatar_color, bio, prefs, last_seen) on public.profiles to authenticated;
+grant update (display_name, avatar_emoji, avatar_color, avatar_path, bio, prefs, last_seen) on public.profiles to authenticated;
 grant select on public.invite_codes, public.friendships to authenticated;
 grant select on public.chats to authenticated;
 grant update (name, icon, settings) on public.chats to authenticated;
@@ -517,6 +520,16 @@ on conflict (id) do update set public = true, file_size_limit = excluded.file_si
 drop policy if exists "upload own stickers" on storage.objects;
 create policy "upload own stickers" on storage.objects for insert to authenticated
   with check (bucket_id = 'stickers' and (storage.foldername(name))[1] = auth.uid()::text);
+
+-- Profile pictures (public bucket; people upload into their own folder)
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('avatars', 'avatars', true, 1048576, array['image/png', 'image/webp', 'image/jpeg'])
+on conflict (id) do update set public = true, file_size_limit = excluded.file_size_limit,
+  allowed_mime_types = excluded.allowed_mime_types;
+
+drop policy if exists "upload own avatar" on storage.objects;
+create policy "upload own avatar" on storage.objects for insert to authenticated
+  with check (bucket_id = 'avatars' and (storage.foldername(name))[1] = auth.uid()::text);
 
 -- ---------------------------------------------------------------------------
 -- Live updates

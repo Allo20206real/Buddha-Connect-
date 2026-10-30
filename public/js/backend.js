@@ -41,6 +41,9 @@
     }
     if (/failed to fetch|networkerror|load failed/i.test(msg)) return new Error('Can’t reach the server. Check your connection.');
     if (/rate limit/i.test(msg)) return new Error('Too many tries. Take a breath and try again in a minute.');
+    if (/avatar_path|bucket not found/i.test(msg)) {
+      return new Error('Profile pictures need the newest database setup: run supabase/setup.sql again in Supabase’s SQL Editor.');
+    }
     return new Error(msg);
   }
 
@@ -57,7 +60,7 @@
       id: p.id,
       username: p.username,
       displayName: p.display_name,
-      avatar: { emoji: p.avatar_emoji, color: p.avatar_color },
+      avatar: { emoji: p.avatar_emoji, color: p.avatar_color, photo: p.avatar_path ? publicUrl('avatars', p.avatar_path) : null },
       bio: p.bio || '',
       lastSeen: ms(p.last_seen),
       online: online.has(p.id),
@@ -175,7 +178,7 @@
     await sb.auth.signOut();
   }
 
-  async function updateMe({ displayName, bio, avatar, prefs, password, newPassword }) {
+  async function updateMe({ displayName, bio, avatar, prefs, password, newPassword, removePhoto }) {
     if (newPassword !== undefined) {
       if (String(newPassword).length < 6) throw new Error('New password must be at least 6 characters.');
       const ok = await sb.auth.signInWithPassword({ email: emailFor(meCache.username), password: String(password || '') });
@@ -188,6 +191,7 @@
     if (avatar?.emoji) patch.avatar_emoji = avatar.emoji;
     if (/^#[0-9a-f]{6}$/i.test(avatar?.color || '')) patch.avatar_color = avatar.color;
     if (prefs) patch.prefs = { ...meCache.prefs, ...prefs };
+    if (removePhoto) patch.avatar_path = null;
     if (Object.keys(patch).length) check(await sb.from('profiles').update(patch).eq('id', me));
     return loadMe();
   }
@@ -386,14 +390,26 @@
     ];
   }
 
-  async function uploadSticker(dataUrl) {
+  // Uploads an image into my own folder of a storage bucket and returns its path.
+  async function uploadImage(bucket, dataUrl, maxBytes) {
     const blob = await (await fetch(dataUrl)).blob();
-    if (blob.size > 1_500_000) throw new Error('That sticker is too big (max 1.5 MB).');
+    if (blob.size > maxBytes) throw new Error(`That picture is too big (max ${(maxBytes / 1_000_000).toFixed(1)} MB).`);
     const ext = { 'image/webp': 'webp', 'image/png': 'png', 'image/jpeg': 'jpg' }[blob.type];
-    if (!ext) throw new Error('Stickers must be PNG, WebP or JPEG images.');
+    if (!ext) throw new Error('Pictures must be PNG, WebP or JPEG images.');
     const id = crypto.randomUUID().replace(/-/g, '').slice(0, 20);
     const path = `${me}/${id}.${ext}`;
-    check(await sb.storage.from('stickers').upload(path, blob, { contentType: blob.type, cacheControl: '31536000' }));
+    check(await sb.storage.from(bucket).upload(path, blob, { contentType: blob.type, cacheControl: '31536000' }));
+    return path;
+  }
+
+  async function uploadAvatar(dataUrl) {
+    const path = await uploadImage('avatars', dataUrl, 1_000_000);
+    check(await sb.from('profiles').update({ avatar_path: path }).eq('id', me));
+    return loadMe();
+  }
+
+  async function uploadSticker(dataUrl) {
+    const path = await uploadImage('stickers', dataUrl, 1_500_000);
     check(await sb.from('user_stickers').insert({ user_id: me, path }));
     return { sticker: `c:${path}`, user: await loadMe() };
   }
@@ -409,9 +425,11 @@
     return loadMe();
   }
 
-  function stickerUrl(path) {
-    return `${cfg.supabaseUrl}/storage/v1/object/public/stickers/${path.split('/').map(encodeURIComponent).join('/')}`;
+  function publicUrl(bucket, path) {
+    return `${cfg.supabaseUrl}/storage/v1/object/public/${bucket}/${path.split('/').map(encodeURIComponent).join('/')}`;
   }
+
+  const stickerUrl = (path) => publicUrl('stickers', path);
 
   // ---- Live updates --------------------------------------------------------
 
@@ -541,6 +559,7 @@
     typing,
     packs,
     uploadSticker,
+    uploadAvatar,
     saveSticker,
     deleteSticker,
     stickerUrl,
